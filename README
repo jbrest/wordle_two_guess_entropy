@@ -1,0 +1,128 @@
+# Wordle Two-Guess Entropy Optimizer
+
+This project explores a non-adaptive Wordle strategy:
+
+**What are the two fixed opening guesses that maximize information about the hidden word, assuming you do NOT adapt your second guess based on feedback from the first?**
+
+Most Wordle solvers focus on *adaptive* play (recomputing the best guess each turn). This project instead solves a different problem:
+
+> Choose two words in advance that, together, maximally reduce uncertainty about the answer.
+
+---
+
+## 🚀 What This Project Does
+
+- Loads Wordle answer and allowed word lists
+- Computes Wordle feedback patterns efficiently
+- Builds a reusable pattern matrix for fast evaluation
+- Computes entropy for single guesses
+- Computes **joint entropy** for all two-word opening pairs
+- Uses provably safe pruning bounds to avoid most of the naive \(O(n^2)\) work
+
+The result is a ranked list of the best *non-adaptive two-guess openings*.
+
+---
+
+## 🧠 Why This Is Interesting
+
+Instead of simulating perfect play, this project designs a human-friendly strategy.
+
+Even after a high-information first guess, the information-theoretically strongest second guesses are often surprisingly unintuitive. They may use letter combinations that feel odd or unhelpful to a human player, even though they are mathematically efficient at partitioning the space of possible answers.
+
+The goal of this project is to generate a high-information two-word “probe” that works well across the entire answer space. After that probe — or earlier, if the feedback from the first word is especially suggestive — the player can switch to normal, human-style adaptive reasoning once the remaining possibilities are sufficiently narrow to grasp intuitively.
+
+In other words, the purpose of this project is to front-load as much information as possible into the first two moves, when human intuition is weakest, and then hand the problem back to the player once it becomes cognitively manageable.
+
+---
+
+## 🛠 Installation
+
+Requires Python 3.10+.
+
+```bash
+git clone <your-repo-url>
+cd wordle-two-guess-entropy
+pip install -r requirements.txt
+```
+
+---
+
+## 📁 Word Lists
+
+Place word lists in:
+
+```
+data/answers.txt
+data/allowed.txt
+```
+
+You may use the original Wordle lists or expanded lists. Results depend on the answer set size.
+
+---
+
+## 🧮 First Run
+
+On first run, the program builds a pattern matrix:
+
+```bash
+python main.py
+```
+
+This may take a few minutes and creates:
+
+```
+data/pattern_matrix.npy
+```
+
+Future runs reuse this file.
+
+---
+
+## 🔍 Find Best Two-Guess Openings
+
+```bash
+python two_guess_main.py
+```
+
+This runs the optimized search and prints the top-scoring word pairs.
+
+---
+
+## ⚙️ Optimization Techniques Used
+
+The project uses several safe, provable optimizations:
+
+- Precomputed guess/answer pattern matrix
+- Entropy upper bounds to skip hopeless first guesses
+- Pairwise bounds to skip weak second guesses
+- Symmetry reduction (word A + B is same as B + A)
+
+These reduce effective computation from billions of pairs to a tiny fraction.
+
+---
+
+## 📊 Interpreting the "Bits"
+
+Entropy values are measured in **bits of information gained**.
+
+The maximum possible information depends on the number of possible answers:
+
+```
+max_bits = log2(number_of_answers)
+```
+
+So entropy values are meaningful *within a given answer list*, but not directly comparable across different lists.
+
+---
+
+## 📜 License
+
+MIT License. See LICENSE file.
+
+---
+
+## 🤖 Attribution
+
+This project was developed with design and optimization guidance from OpenAI's ChatGPT.
+
+The core idea and problem framing were developed by the repository author.

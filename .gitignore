@@ -1,0 +1,6 @@
+data/pattern_matrix.npy
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+.pytest_cache/
