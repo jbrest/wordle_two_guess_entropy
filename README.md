@@ -41,7 +41,7 @@ Requires Python 3.10+.
 
 ```bash
 git clone <your-repo-url>
-cd wordle-two-guess-entropy
+cd <your-repo-directory>
 pip install -r requirements.txt
 ```
 
@@ -65,7 +65,7 @@ You may use the original Wordle lists or expanded lists. Results depend on the a
 On first run, the program builds a pattern matrix:
 
 ```bash
-python main.py
+python wordle_entropy.py
 ```
 
 This may take a few minutes and creates:
@@ -81,10 +81,41 @@ Future runs reuse this file.
 ## 🔍 Find Best Two-Guess Openings
 
 ```bash
-python two_guess_main.py
+python wordle_entropy.py -words 2
 ```
 
 This runs the optimized search and prints the top-scoring word pairs.
+
+For verbose pair output with individual entropies and first-word cost:
+
+```bash
+python wordle_entropy.py -words 2 -verbose
+```
+
+Pair order is an artifact of the search implementation: pairs are emitted as
+`first + second` with the first word having greater-than-or-equal single-word
+entropy than the second. In practice, this front-loads information into guess 1
+and improves your chance of a dynamic offramp after the first guess. It is
+still a pair-optimization result, so the first word is not guaranteed to match
+the globally optimal standalone single opener.
+
+Output lines include answer-membership flags in brackets:
+
+- `[++]` both words are valid hidden-answer words (`answers.txt`)
+- `[+-]` only the first word is an answer word
+- `[-+]` only the second word is an answer word
+- `[--]` neither word is an answer word (both are still valid guesses)
+
+For `python wordle_entropy.py` single-guess output:
+
+- `[+]` the word is in `answers.txt`
+- `[-]` the word is guess-only (in `allowed.txt` but not `answers.txt`)
+
+Single-guess mode is the default and equivalent to:
+
+```bash
+python wordle_entropy.py -words 1
+```
 
 ---
 
@@ -118,6 +149,12 @@ So entropy values are meaningful *within a given answer list*, but not directly 
 ## 📜 License
 
 MIT License. See LICENSE file.
+
+---
+
+## 🧾 Version History
+
+Project version history is tracked in `CHANGELOG.md`.
 
 ---
 

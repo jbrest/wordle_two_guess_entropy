@@ -24,7 +24,10 @@ from tqdm import tqdm
 
 
 # Location where the pattern matrix is stored
-MATRIX_PATH = Path("data/pattern_matrix.npy")
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+MATRIX_PATH = DATA_DIR / "pattern_matrix.npy"
+ANSWERS_PATH = DATA_DIR / "answers.txt"
+ALLOWED_PATH = DATA_DIR / "allowed.txt"
 
 
 def encode_pattern(guess: str, answer: str) -> int:
@@ -101,10 +104,25 @@ def load_or_build_matrix(allowed: list[str], answers: list[str]) -> np.ndarray:
     if MATRIX_PATH.exists():
         matrix = np.load(MATRIX_PATH)
 
-        if matrix.shape == (n_allowed, n_answers):
+        # Guard 1: matrix dimensions must match active word lists.
+        shape_ok = matrix.shape == (n_allowed, n_answers)
+
+        # Guard 2: if either source word file is newer than the matrix cache,
+        # assume the matrix is stale and force a rebuild.
+        matrix_mtime = MATRIX_PATH.stat().st_mtime
+        answers_mtime = ANSWERS_PATH.stat().st_mtime
+        allowed_mtime = ALLOWED_PATH.stat().st_mtime
+        cache_is_new_enough = (
+            matrix_mtime >= answers_mtime and matrix_mtime >= allowed_mtime
+        )
+
+        if shape_ok and cache_is_new_enough:
             print("Loaded compatible pattern matrix from disk.")
             return matrix
 
-        print("Matrix shape mismatch. Rebuilding.")
+        if not shape_ok:
+            print("Matrix shape mismatch. Rebuilding.")
+        else:
+            print("Matrix is older than word lists. Rebuilding.")
 
     return build_matrix(allowed, answers)
