@@ -35,6 +35,16 @@ TOP_TRIPLES = 50
 TRIPLE_STATUS_SECONDS = 1.0
 
 
+def _pct(cur, total):
+    if total <= 0:
+        return 0.0
+    return 100.0 * cur / total
+
+
+def _fmt_frac(cur, total, width):
+    return f"{cur:>{width},}/{total:>{width},}"
+
+
 def run_single_guess(answers, allowed, matrix):
     answer_set = set(answers)
 
@@ -221,15 +231,27 @@ def run_three_guess(answers, allowed, matrix, verbose):
     }
     stop_event = threading.Event()
     print("Starting optimized full three guess search...\n")
-    outer_bar = tqdm(
-        range(outer_total),
-        desc=f"[A,B,C]=[0/{max(1, outer_total)} 0/{max(1, n_allowed-2)} 0/1]",
-        position=0,
-    )
-    yz_bar = tqdm(
+    w1 = len(f"{max(1, outer_total):,}")
+    w2 = len(f"{max(1, n_allowed - 2):,}")
+    w3 = len(f"{max(1, n_allowed - 3):,}")
+    progress_bar = tqdm(
         total=0,
         bar_format="{desc}",
-        desc="[Y,Z]=[N/A N/A] floor=warming t=0.0m",
+        desc=(
+            f"1st: {_fmt_frac(0, max(1, outer_total), w1)} ({0.0:5.1f}%) | "
+            f"2nd: {_fmt_frac(0, max(1, n_allowed - 2), w2)} ({0.0:5.1f}%) | "
+            f"3rd: {_fmt_frac(0, 1, w3)} ({0.0:5.1f}%)"
+        ),
+        position=0,
+    )
+    stats_bar = tqdm(
+        total=0,
+        bar_format="{desc}",
+        desc=(
+            "Prune efficiency: 2nd N/A | 3rd N/A | "
+            "Current max: warming | Elapsed: 0.0m | "
+            "Speed: 0 triple-evals/s | Checked: 0"
+        ),
         position=1,
         leave=False,
     )
@@ -237,35 +259,49 @@ def run_three_guess(answers, allowed, matrix, verbose):
     def monitor():
         while not stop_event.wait(TRIPLE_STATUS_SECONDS):
             p = progress
+            elapsed = time.time() - start_time
+            a_tot = max(1, p["a_tot"])
+            b_tot = max(1, p["b_tot"])
+            c_tot = max(1, p["c_tot"])
+            line1 = (
+                f"1st: {_fmt_frac(p['a_cur'], a_tot, w1)} ({_pct(p['a_cur'], a_tot):5.1f}%) | "
+                f"2nd: {_fmt_frac(p['b_cur'], b_tot, w2)} ({_pct(p['b_cur'], b_tot):5.1f}%) | "
+                f"3rd: {_fmt_frac(p['c_cur'], c_tot, w3)} ({_pct(p['c_cur'], c_tot):5.1f}%)"
+            )
+            progress_bar.set_description_str(line1)
+
             y_text = "N/A"
             if p["possible_j_completed"] > 0:
-                y = 100.0 * p["actual_j_completed"] / p["possible_j_completed"]
-                y_text = f"{y:5.1f}%"
+                y = 100.0 * (
+                    1.0 - (p["actual_j_completed"] / p["possible_j_completed"])
+                )
+                y_text = f"{y:5.1f}% skipped"
+
             z_text = "N/A"
             if p["possible_k_completed"] > 0:
-                z = 100.0 * p["actual_k_completed"] / p["possible_k_completed"]
-                z_text = f"{z:5.1f}%"
+                z = 100.0 * (
+                    1.0 - (p["actual_k_completed"] / p["possible_k_completed"])
+                )
+                z_text = f"{z:5.1f}% skipped"
 
             floor = p["floor"]
-            floor_text = f"{floor:.4f}" if floor is not None else "warming"
-            elapsed = time.time() - start_time
+            floor_text = f"{floor:.4f} bits" if floor is not None else "warming"
+            speed = p["actual_k_completed"] / elapsed if elapsed > 0 else 0.0
+            line2 = (
+                f"Prune efficiency: 2nd {y_text} | 3rd {z_text} | "
+                f"Current max: {floor_text} | Elapsed: {elapsed/60:.1f}m | "
+                f"Speed: {speed:,.0f} triple-evals/s | Checked: {p['actual_k_completed']:,}"
+            )
+            stats_bar.set_description_str(line2)
 
-            outer_bar.set_description_str(
-                f"[A,B,C]=[{p['a_cur']}/{max(1, p['a_tot'])} "
-                f"{p['b_cur']}/{max(1, p['b_tot'])} "
-                f"{p['c_cur']}/{max(1, p['c_tot'])}]"
-            )
-            yz_bar.set_description_str(
-                f"[Y,Z]=[{y_text} {z_text}] floor={floor_text} t={elapsed/60:.1f}m"
-            )
-            outer_bar.refresh()
-            yz_bar.refresh()
+            progress_bar.refresh()
+            stats_bar.refresh()
 
     monitor_thread = threading.Thread(target=monitor, daemon=True)
     monitor_thread.start()
 
     try:
-        for pos_i in outer_bar:
+        for pos_i in range(outer_total):
             progress["a_cur"] = pos_i + 1
             progress["b_cur"] = 0
             progress["c_cur"] = 0
@@ -348,8 +384,8 @@ def run_three_guess(answers, allowed, matrix, verbose):
     finally:
         stop_event.set()
         monitor_thread.join(timeout=1.0)
-        yz_bar.close()
-        outer_bar.close()
+        stats_bar.close()
+        progress_bar.close()
 
     best_triples.sort(reverse=True)
 
