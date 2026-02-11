@@ -18,6 +18,7 @@ Optional:
 
 import argparse
 import heapq
+import threading
 import time
 
 import numpy as np
@@ -31,6 +32,7 @@ from src.words import load_words
 TOP_SINGLE = 20
 TOP_PAIRS = 50
 TOP_TRIPLES = 50
+TRIPLE_STATUS_SECONDS = 1.0
 
 
 def run_single_guess(answers, allowed, matrix):
@@ -197,64 +199,157 @@ def run_three_guess(answers, allowed, matrix, verbose):
     matrix_u32_59049 = matrix_u32 * 59049
     sorted_indices = np.argsort(single_entropies)[::-1]
     sorted_entropies = single_entropies[sorted_indices]
+    max_entropy = float(np.log2(len(answers)))
 
     best_triples = []
     start_time = time.time()
     early_exit_reason = None
+    outer_total = n_allowed - 2
 
+    progress = {
+        "a_cur": 0,
+        "a_tot": outer_total,
+        "b_cur": 0,
+        "b_tot": 0,
+        "c_cur": 0,
+        "c_tot": 0,
+        "floor": None,
+        "possible_j_completed": 0,
+        "actual_j_completed": 0,
+        "possible_k_completed": 0,
+        "actual_k_completed": 0,
+    }
+    stop_event = threading.Event()
     print("Starting optimized full three guess search...\n")
+    outer_bar = tqdm(
+        range(outer_total),
+        desc=f"[A,B,C]=[0/{max(1, outer_total)} 0/{max(1, n_allowed-2)} 0/1]",
+        position=0,
+    )
+    yz_bar = tqdm(
+        total=0,
+        bar_format="{desc}",
+        desc="[Y,Z]=[N/A N/A] floor=warming t=0.0m",
+        position=1,
+        leave=False,
+    )
 
-    for pos_i in tqdm(range(n_allowed - 2), desc="First guess"):
-        i = sorted_indices[pos_i]
-        h1 = sorted_entropies[pos_i]
-        row1_scaled = matrix_u32_59049[i]
+    def monitor():
+        while not stop_event.wait(TRIPLE_STATUS_SECONDS):
+            p = progress
+            y_text = "N/A"
+            if p["possible_j_completed"] > 0:
+                y = 100.0 * p["actual_j_completed"] / p["possible_j_completed"]
+                y_text = f"{y:5.1f}%"
+            z_text = "N/A"
+            if p["possible_k_completed"] > 0:
+                z = 100.0 * p["actual_k_completed"] / p["possible_k_completed"]
+                z_text = f"{z:5.1f}%"
 
-        if len(best_triples) == TOP_TRIPLES and pos_i + 2 < n_allowed:
-            cutoff = best_triples[0][0]
-            upper_bound = h1 + sorted_entropies[pos_i + 1] + sorted_entropies[pos_i + 2]
-            if upper_bound <= cutoff:
-                early_exit_reason = (
-                    f"Early exit at outer index {pos_i}: "
-                    f"best possible remaining triple upper bound "
-                    f"{upper_bound:.6f} <= current floor {cutoff:.6f}."
-                )
-                break
-
-        for pos_j in range(pos_i + 1, n_allowed - 1):
-            j = sorted_indices[pos_j]
-            h2 = sorted_entropies[pos_j]
-
-            if len(best_triples) == TOP_TRIPLES and pos_j + 1 < n_allowed:
-                cutoff = best_triples[0][0]
-                upper_bound = h1 + h2 + sorted_entropies[pos_j + 1]
-                if upper_bound <= cutoff:
-                    break
-
-            row12_scaled = row1_scaled + matrix_u32_243[j]
-
-            for pos_k in range(pos_j + 1, n_allowed):
-                h3 = sorted_entropies[pos_k]
-                if len(best_triples) == TOP_TRIPLES and (h1 + h2 + h3) <= best_triples[0][
-                    0
-                ]:
-                    break
-
-                k = sorted_indices[pos_k]
-                h123 = three_guess_entropy(row12_scaled, matrix_u32[k])
-
-                if len(best_triples) < TOP_TRIPLES:
-                    heapq.heappush(best_triples, (h123, i, j, k))
-                elif h123 > best_triples[0][0]:
-                    heapq.heapreplace(best_triples, (h123, i, j, k))
-
-        if pos_i % 10 == 0 and pos_i > 0:
+            floor = p["floor"]
+            floor_text = f"{floor:.4f}" if floor is not None else "warming"
             elapsed = time.time() - start_time
-            rate = pos_i / elapsed
-            remaining = (n_allowed - pos_i) / rate if rate > 0 else 0
-            tqdm.write(
-                f"Processed {pos_i}/{n_allowed} first guesses. "
-                f"Elapsed: {elapsed/60:.1f} min, ETA: {remaining/60:.1f} min"
+
+            outer_bar.set_description_str(
+                f"[A,B,C]=[{p['a_cur']}/{max(1, p['a_tot'])} "
+                f"{p['b_cur']}/{max(1, p['b_tot'])} "
+                f"{p['c_cur']}/{max(1, p['c_tot'])}]"
             )
+            yz_bar.set_description_str(
+                f"[Y,Z]=[{y_text} {z_text}] floor={floor_text} t={elapsed/60:.1f}m"
+            )
+            outer_bar.refresh()
+            yz_bar.refresh()
+
+    monitor_thread = threading.Thread(target=monitor, daemon=True)
+    monitor_thread.start()
+
+    try:
+        for pos_i in outer_bar:
+            progress["a_cur"] = pos_i + 1
+            progress["b_cur"] = 0
+            progress["c_cur"] = 0
+            progress["b_tot"] = n_allowed - pos_i - 2
+            progress["c_tot"] = 0
+            outer_possible_j = max(0, n_allowed - pos_i - 2)
+            outer_actual_j = 0
+            i = sorted_indices[pos_i]
+            h1 = sorted_entropies[pos_i]
+            row1_scaled = matrix_u32_59049[i]
+
+            if len(best_triples) == TOP_TRIPLES and pos_i + 2 < n_allowed:
+                cutoff = best_triples[0][0]
+                upper_bound = min(
+                    max_entropy,
+                    h1 + sorted_entropies[pos_i + 1] + sorted_entropies[pos_i + 2],
+                )
+                if upper_bound <= cutoff:
+                    early_exit_reason = (
+                        f"Early exit at outer index {pos_i}: "
+                        f"best possible remaining triple upper bound "
+                        f"{upper_bound:.6f} <= current floor {cutoff:.6f}."
+                    )
+                    break
+
+            for pos_j in range(pos_i + 1, n_allowed - 1):
+                outer_actual_j += 1
+                progress["b_cur"] = pos_j - pos_i
+                progress["c_cur"] = 0
+                progress["c_tot"] = n_allowed - pos_j - 1
+                middle_possible_k = max(0, n_allowed - pos_j - 1)
+                middle_actual_k = 0
+                j = sorted_indices[pos_j]
+                h2 = sorted_entropies[pos_j]
+
+                if len(best_triples) == TOP_TRIPLES and pos_j + 1 < n_allowed:
+                    cutoff = best_triples[0][0]
+                    upper_bound = min(max_entropy, h1 + h2 + sorted_entropies[pos_j + 1])
+                    if upper_bound <= cutoff:
+                        break
+
+                # Compute pair entropy once for this (i, j) branch and use it for
+                # tighter safe bounds on all k in the branch:
+                # H123 <= H12 + H3 and H123 <= log2(|answers|).
+                h12 = two_guess_entropy(matrix_u32_243[i], matrix_u32[j])
+                if len(best_triples) == TOP_TRIPLES and pos_j + 1 < n_allowed:
+                    cutoff = best_triples[0][0]
+                    upper_bound = min(max_entropy, h12 + sorted_entropies[pos_j + 1])
+                    if upper_bound <= cutoff:
+                        break
+
+                row12_scaled = row1_scaled + matrix_u32_243[j]
+
+                for pos_k in range(pos_j + 1, n_allowed):
+                    if pos_k % 2048 == 0:
+                        progress["c_cur"] = pos_k - pos_j
+                    h3 = sorted_entropies[pos_k]
+                    if len(best_triples) == TOP_TRIPLES and min(max_entropy, h12 + h3) <= best_triples[
+                        0
+                    ][0]:
+                        break
+
+                    k = sorted_indices[pos_k]
+                    h123 = three_guess_entropy(row12_scaled, matrix_u32[k])
+                    middle_actual_k += 1
+
+                    if len(best_triples) < TOP_TRIPLES:
+                        heapq.heappush(best_triples, (h123, i, j, k))
+                    elif h123 > best_triples[0][0]:
+                        heapq.heapreplace(best_triples, (h123, i, j, k))
+
+                progress["possible_k_completed"] += middle_possible_k
+                progress["actual_k_completed"] += middle_actual_k
+                if len(best_triples) == TOP_TRIPLES:
+                    progress["floor"] = best_triples[0][0]
+                progress["c_cur"] = progress["c_tot"]
+
+            progress["possible_j_completed"] += outer_possible_j
+            progress["actual_j_completed"] += outer_actual_j
+    finally:
+        stop_event.set()
+        monitor_thread.join(timeout=1.0)
+        yz_bar.close()
+        outer_bar.close()
 
     best_triples.sort(reverse=True)
 
