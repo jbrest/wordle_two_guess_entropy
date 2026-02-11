@@ -7,9 +7,11 @@ All notable changes to this project are documented in this file.
 ### Added
 - Unified CLI entrypoint: `wordle_entropy.py`.
 - New CLI options:
-  - `-words {1,2}` (default: `1`)
-  - `-verbose` (two-word outputs)
+  - `-words {1,2,3}` (default: `1`)
+  - `-verbose` (two-word and three-word outputs)
   - `-pair WORD1 WORD2` (overrides `-words`, supports `-verbose`)
+  - `-triple WORD1 WORD2 WORD3` (overrides `-words`, supports `-verbose`)
+  - `-force` (skip confirmation prompt for `-words 3`)
 - GitHub Actions CI workflow for syntax checks in `.github/workflows/ci.yml`.
 - Cache staleness guard for pattern matrix using timestamp checks against
   `data/answers.txt` and `data/allowed.txt`.

@@ -104,6 +104,31 @@ Verbose works with `-pair` as well:
 python wordle_entropy.py -pair raise mount -verbose
 ```
 
+To evaluate one specific triple directly (overrides `-words`):
+
+```bash
+python wordle_entropy.py -triple raise mount clint
+```
+
+Verbose works with `-triple` as well:
+
+```bash
+python wordle_entropy.py -triple raise mount clint -verbose
+```
+
+To search for top three-word non-adaptive openings:
+
+```bash
+python wordle_entropy.py -words 3
+```
+
+This mode is extremely expensive and asks for confirmation before starting.
+For unattended runs, skip confirmation with:
+
+```bash
+python wordle_entropy.py -words 3 -force
+```
+
 Pair order is an artifact of the search implementation: pairs are emitted as
 `first + second` with the first word having greater-than-or-equal single-word
 entropy than the second. In practice, this front-loads information into guess 1

@@ -28,3 +28,16 @@ def two_guess_entropy(row1_scaled, row2):
     joint = row1_scaled + row2
     counts = np.bincount(joint)
     return entropy_from_counts(counts)
+
+
+def three_guess_entropy(row12_scaled, row3):
+    """
+    Joint entropy of three guesses.
+    Treat (pattern1, pattern2, pattern3) tuples as a combined outcome.
+
+    Uses unique-value counting instead of bincount to avoid allocating very
+    large intermediate arrays for 3-guess code ranges.
+    """
+    joint = row12_scaled + row3
+    _, counts = np.unique(joint, return_counts=True)
+    return entropy_from_counts(counts)
