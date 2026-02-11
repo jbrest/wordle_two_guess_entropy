@@ -8,8 +8,8 @@ Modes:
 -words 2: top two-guess non-adaptive entropy pairs
 
 Optional:
--verbose (used only with -words 2): show individual entropies and first-word
-cost vs the globally best standalone opener.
+-verbose: show individual entropies and first-word cost for two-word outputs.
+-pair WORD1 WORD2: evaluate one specific two-guess pair; overrides -words.
 """
 
 import argparse
@@ -136,6 +136,48 @@ def run_two_guess(answers, allowed, matrix, verbose):
             print(f"{word_i} + {word_j} [{flag_i}{flag_j}]: {h12:.4f} bits")
 
 
+def run_specific_pair(answers, allowed, matrix, word1, word2, verbose):
+    answer_set = set(answers)
+
+    try:
+        i = allowed.index(word1)
+    except ValueError as exc:
+        raise ValueError(f"word not found in allowed list: {word1}") from exc
+
+    try:
+        j = allowed.index(word2)
+    except ValueError as exc:
+        raise ValueError(f"word not found in allowed list: {word2}") from exc
+
+    single_entropies = np.array([single_guess_entropy(matrix[k]) for k in range(len(allowed))])
+    best_single_entropy = float(np.max(single_entropies))
+    h1 = float(single_entropies[i])
+    h2 = float(single_entropies[j])
+    row1_scaled = matrix[i].astype(np.uint16) * 243
+    h12 = two_guess_entropy(row1_scaled, matrix[j])
+    cost = best_single_entropy - h1
+
+    flag_i = "+" if word1 in answer_set else "-"
+    flag_j = "+" if word2 in answer_set else "-"
+
+    print("\nSpecific two guess pair (non-adaptive, exact):")
+    if verbose:
+        print(
+            "Legend: word1 + word2 [flags]: H12 bits (H1, H2) | "
+            "Cost: (H_best_single - H1) bits"
+        )
+    else:
+        print("Legend: word1 + word2 [flags]: H12 bits")
+    print("flags: [++] both answers, [+-] first only, [-+] second only, [--] neither")
+    if verbose:
+        print(
+            f"{word1} + {word2} [{flag_i}{flag_j}]: {h12:.4f} bits "
+            f"({h1:.4f}, {h2:.4f}) | Cost: {cost:.4f} bits"
+        )
+    else:
+        print(f"{word1} + {word2} [{flag_i}{flag_j}]: {h12:.4f} bits")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Wordle entropy analyzer for one-guess and two-guess modes."
@@ -150,7 +192,13 @@ def parse_args():
     parser.add_argument(
         "-verbose",
         action="store_true",
-        help="For -words 2, show individual entropies and first-word cost.",
+        help="For pair modes, show individual entropies and first-word cost.",
+    )
+    parser.add_argument(
+        "-pair",
+        nargs=2,
+        metavar=("WORD1", "WORD2"),
+        help="Evaluate one specific pair; overrides -words.",
     )
     return parser.parse_args()
 
@@ -159,6 +207,14 @@ def main():
     args = parse_args()
     answers, allowed = load_words()
     matrix = load_or_build_matrix(allowed, answers)
+
+    if args.pair is not None:
+        word1, word2 = (w.lower() for w in args.pair)
+        try:
+            run_specific_pair(answers, allowed, matrix, word1, word2, args.verbose)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        return
 
     if args.words == 1:
         run_single_guess(answers, allowed, matrix)

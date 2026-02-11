@@ -92,6 +92,18 @@ For verbose pair output with individual entropies and first-word cost:
 python wordle_entropy.py -words 2 -verbose
 ```
 
+To evaluate one specific pair directly (overrides `-words`):
+
+```bash
+python wordle_entropy.py -pair raise mount
+```
+
+Verbose works with `-pair` as well:
+
+```bash
+python wordle_entropy.py -pair raise mount -verbose
+```
+
 Pair order is an artifact of the search implementation: pairs are emitted as
 `first + second` with the first word having greater-than-or-equal single-word
 entropy than the second. In practice, this front-loads information into guess 1
