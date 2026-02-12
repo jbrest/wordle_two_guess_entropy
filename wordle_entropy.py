@@ -527,6 +527,7 @@ def run_three_guess(
     run_first_p2_elapsed_s = None
     dataset_sig = _dataset_signature(answers, allowed)
     resume_pos_i = 0
+    elapsed_offset_s = 0.0
     last_completed_i_p2_pct = None
     last_completed_j_p3_pct = None
 
@@ -604,6 +605,9 @@ def run_three_guess(
             loaded_initial_ett_s = ckpt.get("initial_ett_s")
             if loaded_initial_ett_s is not None:
                 initial_ett_s = float(loaded_initial_ett_s)
+            loaded_elapsed_total_s = ckpt.get("elapsed_total_s")
+            if loaded_elapsed_total_s is not None:
+                elapsed_offset_s = float(loaded_elapsed_total_s)
             loaded_last_i_p2 = ckpt.get("last_completed_i_p2_pct")
             if loaded_last_i_p2 is not None:
                 last_completed_i_p2_pct = float(loaded_last_i_p2)
@@ -625,9 +629,10 @@ def run_three_guess(
                 progress["floor"] = float(best_triples[0][0])
             early_exit_count = int(ckpt.get("early_exit_count", 0))
             print(
-            f"Resuming from checkpoint {checkpoint_file}: "
-            f"next i={resume_pos_i}/{outer_total}, completed_i={progress['completed_i']}"
-        )
+                f"Resuming from checkpoint {checkpoint_file}: "
+                f"next i={resume_pos_i}/{outer_total}, completed_i={progress['completed_i']}, "
+                f"elapsed={_fmt_ddhhmm(elapsed_offset_s)}"
+            )
         else:
             print(f"Starting fresh and overwriting checkpoint: {checkpoint_file}")
     elif checkpoint_file is not None:
@@ -639,12 +644,14 @@ def run_three_guess(
     )
 
     def build_checkpoint_payload(next_pos_i):
+        elapsed_total_s = elapsed_offset_s + (time.time() - start_time)
         return {
             "schema": 1,
             "dataset_sig": dataset_sig,
             "outer_total": outer_total,
             "next_pos_i": int(next_pos_i),
             "saved_at_epoch_s": time.time(),
+            "elapsed_total_s": float(elapsed_total_s),
             "initial_ett_s": (
                 None
                 if initial_ett_s is None
@@ -752,7 +759,7 @@ def run_three_guess(
             nonlocal p2_head_snap_skipped
             nonlocal p2_head_snap_total
             nonlocal p2_head_snap_pct
-            elapsed = now - start_time
+            elapsed = elapsed_offset_s + (now - start_time)
             prune_total_j = progress["possible_j_completed"]
             actual_total_j = progress["actual_j_completed"]
             prune_skipped_j = max(0, prune_total_j - actual_total_j)
