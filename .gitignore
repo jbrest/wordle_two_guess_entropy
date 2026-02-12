@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 .venv/
 .pytest_cache/
+.wordle3_checkpoint.json

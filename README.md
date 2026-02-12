@@ -129,6 +129,42 @@ For unattended runs, skip confirmation with:
 python wordle_entropy.py -words 3 -force
 ```
 
+For multi-day runs with live dashboard + diagnostics:
+
+```bash
+python wordle_entropy.py -words 3 -force -progress dashboard -debug-prune-file /tmp/p2_diag.csv
+```
+
+### Long-Run Controls (`-words 3`)
+
+- `-workers N`: number of worker processes (default: CPU count)
+- `-chunk-size N`: in-flight task multiplier per worker (default: `2`)
+- `-progress dashboard|live|log|off`: progress display mode
+- `-history-seconds N`: sampling period for history summaries
+- `-stats-file PATH`: sampled runtime/pruning CSV output
+- `-debug-prune-file PATH`: line-buffered prune diagnostics CSV
+
+Checkpointing is enabled by default for 3-word runs:
+
+- Default checkpoint file: `.wordle3_checkpoint.json`
+- Autosaves at startup and after each completed outer-loop `i`
+- On restart, existing checkpoint behavior is controlled with:
+  - `-resume ask` (default): prompt `Resume? [Y/n]`
+  - `-resume auto`: always resume
+  - `-resume new`: ignore old checkpoint and start fresh
+
+Example fresh restart (ignore saved state):
+
+```bash
+python wordle_entropy.py -words 3 -force -progress dashboard -resume new
+```
+
+Resume from existing checkpoint (no prompt):
+
+```bash
+python wordle_entropy.py -words 3 -force -progress dashboard -resume auto
+```
+
 Pair order is an artifact of the search implementation: pairs are emitted as
 `first + second` with the first word having greater-than-or-equal single-word
 entropy than the second. In practice, this front-loads information into guess 1
