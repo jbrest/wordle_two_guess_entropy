@@ -1,12 +1,12 @@
-# Wordle Two-Guess Entropy Optimizer
+# Wordle Non-Adaptive Entropy Optimizer
 
-This project explores a non-adaptive Wordle strategy:
+This project explores non-adaptive Wordle strategies for 1, 2, and 3 fixed opening guesses:
 
-**What are the two fixed opening guesses that maximize information about the hidden word, assuming you do NOT adapt your second guess based on feedback from the first?**
+**What fixed opening guesses maximize information about the hidden word, assuming you do NOT adapt subsequent guesses based on prior feedback?**
 
 Most Wordle solvers focus on *adaptive* play (recomputing the best guess each turn). This project instead solves a different problem:
 
-> Choose two words in advance that, together, maximally reduce uncertainty about the answer.
+> Choose multiple words in advance that, together, maximally reduce uncertainty about the answer.
 
 ---
 
@@ -16,10 +16,10 @@ Most Wordle solvers focus on *adaptive* play (recomputing the best guess each tu
 - Computes Wordle feedback patterns efficiently
 - Builds a reusable pattern matrix for fast evaluation
 - Computes entropy for single guesses
-- Computes **joint entropy** for all two-word opening pairs
-- Uses provably safe pruning bounds to avoid most of the naive \(O(n^2)\) work
+- Computes **joint entropy** for two-word and three-word non-adaptive opening sequences
+- Uses provably safe pruning bounds to avoid most of the naive \(O(n^2)\) and \(O(n^3)\) work
 
-The result is a ranked list of the best *non-adaptive two-guess openings*.
+The result is a ranked list of the best *non-adaptive opening sequences* (1, 2, or 3 words).
 
 ---
 
@@ -123,6 +123,9 @@ python wordle_entropy.py -words 3
 ```
 
 This mode is extremely expensive and asks for confirmation before starting.
+
+**Important:** The 3-word search uses **strict pruning** that guarantees finding the exact top 50 triples. It will never miss a triple that belongs in the top 50, but the search may take days to weeks depending on hardware.
+
 For unattended runs, skip confirmation with:
 
 ```bash
@@ -147,7 +150,8 @@ python wordle_entropy.py -words 3 -force -progress dashboard -debug-prune-file /
 Checkpointing is enabled by default for 3-word runs:
 
 - Default checkpoint file: `.wordle3_checkpoint.json`
-- Autosaves at startup and after each completed outer-loop `i`
+- Autosaves at startup and after each completed outer-loop iteration
+- Preserves all progress including elapsed runtime across restarts
 - On restart, existing checkpoint behavior is controlled with:
   - `-resume ask` (default): prompt `Resume? [Y/n]`
   - `-resume auto`: always resume
@@ -196,12 +200,19 @@ python wordle_entropy.py -words 1
 
 The project uses several safe, provable optimizations:
 
-- Precomputed guess/answer pattern matrix
-- Entropy upper bounds to skip hopeless first guesses
-- Pairwise bounds to skip weak second guesses
-- Symmetry reduction (word A + B is same as B + A)
+- **Precomputed pattern matrix**: All guess/answer feedback patterns computed once
+- **Monotonic upper bounds**: Skip entire suffixes when upper bounds fall below floor
+- **Non-monotonic bounds**: Individual pruning when bounds are not monotonically decreasing
+- **Strict pruning (3-word mode)**: Guarantees finding exact top 50, no false negatives
+- **Parallel processing**: Multi-core worker pool for 3-word search
+- **Shared floor optimization**: Workers share best-known floor to prune aggressively
 
-These reduce effective computation from billions of pairs to a tiny fraction.
+For 3-word search:
+- Pre-H12 pruning uses monotonic `h1 + h2 + h3_best` bound (can prune entire suffix)
+- Post-H12 pruning uses non-monotonic `h12 + h3_best` bound (prunes individual j only)
+- Inner loop uses monotonic `h12 + h3` bound (can prune suffix)
+
+These reduce effective computation from trillions of triples to a manageable fraction while guaranteeing completeness.
 
 ---
 

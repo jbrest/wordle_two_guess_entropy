@@ -6,7 +6,10 @@ Unified CLI for Wordle entropy analysis.
 Modes:
 -words 1 (default): top single-guess entropy words
 -words 2: top two-guess non-adaptive entropy pairs
--words 3: top three-guess non-adaptive entropy triples (very expensive)
+-words 3: top three-guess non-adaptive entropy triples (very expensive, strict mode)
+
+The -words 3 mode uses strict pruning that guarantees finding the exact top 50 triples.
+It will never miss a triple that belongs in the top 50.
 
 Optional:
 -verbose: show individual entropies and first-word cost for pair/triple outputs.
@@ -80,7 +83,7 @@ def _fmt_signed_ddhhmm(seconds):
 
 def _fmt_pct_or_na(value):
     if value is None:
-        return " N/A "
+        return "  N/A "
     return f"{value:5.1f}%"
 
 
@@ -100,6 +103,18 @@ def _render_dashboard(
     current_mid_total,
     possible_j_completed,
     possible_j_total,
+    p2_singleton_last,
+    p2_singleton_all,
+    p2_branch_last,
+    p2_branch_all,
+    p2_elim_last,
+    p2_elim_all,
+    p2_first_singleton_j_last,
+    p2_first_branch_j_last,
+    p2_last_row_len,
+    p2_relaxed_wrong_last,
+    p2_relaxed_false_skip_all,
+    p2_possible_j_for_wrong_all,
     prune_j_last,
     prune_j_all,
     prune_k_last,
@@ -110,6 +125,9 @@ def _render_dashboard(
     ett_s,
     initial_ett_s,
     checked,
+    saved_k_equiv,
+    tt_saved_clock_s,
+    tt_saved_core_s,
     floor,
     max_entropy,
     last_floor_delta,
@@ -122,6 +140,7 @@ def _render_dashboard(
     initial_core_ett_s = None if initial_ett_s is None else (initial_ett_s * worker_count)
     mid_cur_pct = _pct(current_mid_done, current_mid_total)
     progress_label_width = 24
+    prune_label_width = 32
     pct_width = 5
     sep = "   "
     outer_done_w = len(f"{outer_total:,}")
@@ -158,14 +177,38 @@ def _render_dashboard(
             f"{possible_j_completed:>{done_w},} / {possible_j_total:>{total_w},}"
         ),
         "",
-        "Pruning",
+        "Pruning (strict mode: guaranteed exact top 50)",
+        "Inner loop:",
         (
-            "Middle loop (last / cumulative): "
-            f"{_fmt_pct_or_na(prune_j_last)} / {prune_j_all:5.1f}% skipped"
+            f"{'% pruned (last/cumulative):':<{prune_label_width}} "
+            f"{_fmt_pct_or_na(prune_k_last)} / {prune_k_all:5.1f}%"
+        ),
+        "Middle loop:",
+        (
+            f"{'% skipped (last/cumulative):':<{prune_label_width}} "
+            f"{_fmt_pct_or_na(p2_singleton_last)} / {p2_singleton_all:5.1f}%"
         ),
         (
-            "Inner loop (last / cumulative):  "
-            f"{_fmt_pct_or_na(prune_k_last)} / {prune_k_all:5.1f}% skipped"
+            f"{'% pruned (last/cumulative):':<{prune_label_width}} "
+            f"{_fmt_pct_or_na(p2_branch_last)} / {p2_branch_all:5.1f}%"
+        ),
+        (
+            f"{'% eliminated (last/cumulative):':<{prune_label_width}} "
+            f"{_fmt_pct_or_na(p2_elim_last)} / {p2_elim_all:5.1f}%"
+        ),
+        (
+            f"{'First singleton/branch (previous i):':<{prune_label_width}} "
+            f"{'N/A' if p2_first_singleton_j_last is None else f'{p2_first_singleton_j_last:,}'}"
+            f" ({_pct((0 if p2_first_singleton_j_last is None else p2_first_singleton_j_last), p2_last_row_len):.1f}%) / "
+            f"{'N/A' if p2_first_branch_j_last is None else f'{p2_first_branch_j_last:,}'}"
+            f" ({_pct((0 if p2_first_branch_j_last is None else p2_first_branch_j_last), p2_last_row_len):.1f}%)"
+            if p2_last_row_len > 0
+            else f"{'First singleton/branch (previous i):':<{prune_label_width}} N/A"
+        ),
+        (
+            f"{'False skip tracking (last/cumulative):':<{prune_label_width}} "
+            f"{_fmt_pct_or_na(p2_relaxed_wrong_last)} / "
+            f"{_pct(p2_relaxed_false_skip_all, p2_possible_j_for_wrong_all):5.1f}%"
         ),
         "",
         "Runtime",
@@ -189,6 +232,11 @@ def _render_dashboard(
         )
         if initial_core_ett_s is not None
         else "Core ETT delta vs initial(warm): N/A",
+        (
+            f"TT saved to date (est): Clock {_fmt_ddhhmm(tt_saved_clock_s)} | "
+            f"Core {_fmt_ddhhmm(tt_saved_core_s)}"
+        ),
+        f"saved work: {_compact_int(saved_k_equiv)} k-equiv evals",
         f"checked: {_compact_int(checked)} triple-evals",
         "",
         "Floor",
@@ -494,10 +542,21 @@ def run_three_guess(
     progress_mode="dashboard",
     stats_file=None,
     debug_prune_file=None,
-    checkpoint_file=".wordle3_checkpoint.json",
+    checkpoint_file=None,
     resume_mode="ask",
     history_seconds=DEFAULT_HISTORY_SECONDS,
 ):
+    """
+    Find top three-guess non-adaptive entropy triples.
+
+    This function uses strict pruning logic that guarantees finding the exact
+    top 50 triples. It will never miss a triple that belongs in the top 50.
+
+    Pruning strategy:
+    - Pre-H12: Uses h1 + h2 + h3_best bound (monotonic, can prune entire suffix)
+    - Post-H12: Uses h12 + h3_best bound (non-monotonic, prunes individual j only)
+    - Inner loop: Uses h12 + h3 bound (monotonic, can prune suffix)
+    """
     answer_set = set(answers)
     n_allowed = len(allowed)
 
@@ -530,6 +589,8 @@ def run_three_guess(
     elapsed_offset_s = 0.0
     last_completed_i_p2_pct = None
     last_completed_j_p3_pct = None
+    checkpoint_last_floor_lift_elapsed_s = None
+    checkpoint_last_floor_lift_delta = 0.0
 
     progress = {
         "completed_i": 0,
@@ -538,6 +599,10 @@ def run_three_guess(
         "possible_k_completed": 0,
         "skipped_k_completed": 0,
         "actual_k_completed": 0,
+        "p2_skipped_k_equiv": 0,
+        "p2_relaxed_false_skip": 0,
+        "p2_hard_pruned_total": 0,
+        "p2_singleton_total": 0,
         "floor": None,
     }
     current_mid_done = 0
@@ -551,29 +616,29 @@ def run_three_guess(
     cur_window = deque()
     current_i_classified_j = 0
     current_i_skipped_j = 0
-    current_i_possible_k = 0
-    current_i_skipped_k = 0
     prev_i_index = None
     prev_i_classified_j = 0
     prev_i_skipped_j = 0
-    prev_i_possible_k = 0
-    prev_i_skipped_k = 0
     current_j_index = None
     current_j_possible_k = 0
     current_j_skipped_k = 0
     prev_j_index = None
     prev_j_possible_k = 0
     prev_j_skipped_k = 0
-    p2_tail_snap_i = None
-    p2_tail_snap_progress_pct = 0.0
-    p2_tail_snap_skipped = 0
-    p2_tail_snap_total = 0
-    p2_tail_snap_pct = 0.0
-    p2_head_snap_i = None
-    p2_head_snap_progress_pct = 0.0
-    p2_head_snap_skipped = 0
-    p2_head_snap_total = 0
-    p2_head_snap_pct = 0.0
+    p2_singleton_count = 0
+    p2_first_singleton_j = None
+    p2_branch_prune_j = None
+    p2_relaxed_false_skip_i = 0
+    p2_encountered_skip_this_i = False
+    p2_first_singleton_offset = None
+    p2_branch_prune_offset = None
+    p2_hard_pruned_i = 0
+    p2_last_row_len = 0
+    p2_last_singleton = 0
+    p2_last_hard_pruned = 0
+    p2_last_relaxed_wrong = 0
+    p2_last_first_singleton_offset = None
+    p2_last_branch_prune_offset = None
 
     if checkpoint_file is not None and os.path.exists(checkpoint_file):
         do_resume = True
@@ -614,6 +679,12 @@ def run_three_guess(
             loaded_last_j_p3 = ckpt.get("last_completed_j_p3_pct")
             if loaded_last_j_p3 is not None:
                 last_completed_j_p3_pct = float(loaded_last_j_p3)
+            loaded_last_floor_lift_elapsed_s = ckpt.get("last_floor_lift_elapsed_s")
+            if loaded_last_floor_lift_elapsed_s is not None:
+                checkpoint_last_floor_lift_elapsed_s = float(loaded_last_floor_lift_elapsed_s)
+            loaded_last_floor_lift_delta = ckpt.get("last_floor_lift_delta")
+            if loaded_last_floor_lift_delta is not None:
+                checkpoint_last_floor_lift_delta = float(loaded_last_floor_lift_delta)
             loaded_triples = ckpt.get("best_triples", [])
             best_triples = []
             for triple in loaded_triples:
@@ -640,7 +711,7 @@ def run_three_guess(
 
     print(
         f"Starting optimized full three guess search using {worker_count} worker(s), "
-        f"chunk size {chunk_size}...\n"
+        f"chunk size {chunk_size} (strict mode: guaranteed exact top {TOP_TRIPLES})...\n"
     )
 
     def build_checkpoint_payload(next_pos_i):
@@ -667,6 +738,12 @@ def run_three_guess(
                 if last_completed_j_p3_pct is None
                 else float(last_completed_j_p3_pct)
             ),
+            "last_floor_lift_elapsed_s": (
+                None
+                if checkpoint_last_floor_lift_elapsed_s is None
+                else float(checkpoint_last_floor_lift_elapsed_s)
+            ),
+            "last_floor_lift_delta": float(checkpoint_last_floor_lift_delta),
             "progress": {
                 "completed_i": int(progress["completed_i"]),
                 "possible_j_completed": int(progress["possible_j_completed"]),
@@ -674,6 +751,10 @@ def run_three_guess(
                 "possible_k_completed": int(progress["possible_k_completed"]),
                 "skipped_k_completed": int(progress["skipped_k_completed"]),
                 "actual_k_completed": int(progress["actual_k_completed"]),
+                "p2_skipped_k_equiv": int(progress["p2_skipped_k_equiv"]),
+                "p2_relaxed_false_skip": int(progress["p2_relaxed_false_skip"]),
+                "p2_hard_pruned_total": int(progress["p2_hard_pruned_total"]),
+                "p2_singleton_total": int(progress["p2_singleton_total"]),
                 "floor": (
                     None
                     if progress["floor"] is None
@@ -736,29 +817,20 @@ def run_three_guess(
             nonlocal last_completed_j_p3_pct
             nonlocal current_i_classified_j
             nonlocal current_i_skipped_j
-            nonlocal current_i_possible_k
-            nonlocal current_i_skipped_k
             nonlocal prev_i_index
             nonlocal prev_i_classified_j
             nonlocal prev_i_skipped_j
-            nonlocal prev_i_possible_k
-            nonlocal prev_i_skipped_k
             nonlocal current_j_index
             nonlocal current_j_possible_k
             nonlocal current_j_skipped_k
             nonlocal prev_j_index
             nonlocal prev_j_possible_k
             nonlocal prev_j_skipped_k
-            nonlocal p2_tail_snap_i
-            nonlocal p2_tail_snap_progress_pct
-            nonlocal p2_tail_snap_skipped
-            nonlocal p2_tail_snap_total
-            nonlocal p2_tail_snap_pct
-            nonlocal p2_head_snap_i
-            nonlocal p2_head_snap_progress_pct
-            nonlocal p2_head_snap_skipped
-            nonlocal p2_head_snap_total
-            nonlocal p2_head_snap_pct
+            nonlocal p2_singleton_count
+            nonlocal p2_first_singleton_j
+            nonlocal p2_branch_prune_j
+            nonlocal checkpoint_last_floor_lift_elapsed_s
+            nonlocal checkpoint_last_floor_lift_delta
             elapsed = elapsed_offset_s + (now - start_time)
             prune_total_j = progress["possible_j_completed"]
             actual_total_j = progress["actual_j_completed"]
@@ -798,6 +870,19 @@ def run_three_guess(
             if current_j_index is not None and current_j_possible_k > 0:
                 prune_k_cur = 100.0 * (current_j_skipped_k / current_j_possible_k)
 
+            p2_hard_all = _pct(progress["p2_hard_pruned_total"], prune_total_j)
+            p2_single_all = _pct(progress["p2_singleton_total"], prune_total_j)
+            p2_elim_all = _pct(
+                progress["p2_hard_pruned_total"] + progress["p2_singleton_total"],
+                prune_total_j,
+            )
+            p2_hard_last = _pct(p2_last_hard_pruned, p2_last_row_len) if p2_last_row_len > 0 else None
+            p2_single_last = _pct(p2_last_singleton, p2_last_row_len) if p2_last_row_len > 0 else None
+            p2_elim_last = _pct(p2_last_hard_pruned + p2_last_singleton, p2_last_row_len) if p2_last_row_len > 0 else None
+            p2_relaxed_wrong_last = (
+                _pct(p2_last_relaxed_wrong, p2_last_row_len) if p2_last_row_len > 0 else None
+            )
+
             p2_i_prev_pct = 0.0
             prune_j_last = last_completed_i_p2_pct
             if prev_i_classified_j > 0:
@@ -815,6 +900,9 @@ def run_three_guess(
             speed_cur = win_delta_checked / win_elapsed if win_delta_checked > 0 else (
                 delta_checked / cur_elapsed
             )
+            saved_k_equiv = progress["skipped_k_completed"] + progress["p2_skipped_k_equiv"]
+            tt_saved_clock_s = saved_k_equiv / speed_all if speed_all > 0 else 0.0
+            tt_saved_core_s = tt_saved_clock_s * worker_count
             remaining_possible_k = max(0, possible_k_total - prune_total_k)
             speed_for_eta = speed_cur if speed_cur > 0 else speed_all
             remaining_actual_k = remaining_possible_k * max(0.0, 1.0 - prune_k_all / 100.0)
@@ -867,6 +955,9 @@ def run_three_guess(
                     last_floor_delta = cur_floor - prev_floor
                     last_floor_lift_elapsed = s["elapsed_s"]
                 prev_floor = cur_floor
+            if last_floor_lift_elapsed is None and checkpoint_last_floor_lift_elapsed_s is not None:
+                last_floor_lift_elapsed = checkpoint_last_floor_lift_elapsed_s
+                last_floor_delta = checkpoint_last_floor_lift_delta
 
             recent_samples = snapshots[-6:]
             floor_display = progress["floor"] if progress["floor"] is not None else 0.0
@@ -895,6 +986,18 @@ def run_three_guess(
                             current_mid_total=current_mid_total,
                             possible_j_completed=prune_total_j,
                             possible_j_total=possible_j_total,
+                            p2_singleton_last=p2_single_last,
+                            p2_singleton_all=p2_single_all,
+                            p2_branch_last=p2_hard_last,
+                            p2_branch_all=p2_hard_all,
+                            p2_elim_last=p2_elim_last,
+                            p2_elim_all=p2_elim_all,
+                            p2_first_singleton_j_last=p2_last_first_singleton_offset,
+                            p2_first_branch_j_last=p2_last_branch_prune_offset,
+                            p2_last_row_len=p2_last_row_len,
+                            p2_relaxed_wrong_last=p2_relaxed_wrong_last,
+                            p2_relaxed_false_skip_all=progress["p2_relaxed_false_skip"],
+                            p2_possible_j_for_wrong_all=prune_total_j,
                             prune_j_last=prune_j_last,
                             prune_j_all=prune_j_all,
                             prune_k_last=prune_k_last,
@@ -905,6 +1008,9 @@ def run_three_guess(
                             ett_s=ett_s,
                             initial_ett_s=initial_ett_s,
                             checked=checked,
+                            saved_k_equiv=saved_k_equiv,
+                            tt_saved_clock_s=tt_saved_clock_s,
+                            tt_saved_core_s=tt_saved_core_s,
                             floor=floor_display,
                             max_entropy=max_entropy,
                             last_floor_delta=last_floor_delta,
@@ -941,17 +1047,21 @@ def run_three_guess(
             current_mid_done = 0
             current_i_classified_j = 0
             current_i_skipped_j = 0
-            current_i_possible_k = 0
-            current_i_skipped_k = 0
             current_j_index = None
             current_j_possible_k = 0
             current_j_skipped_k = 0
             prev_j_index = None
             prev_j_possible_k = 0
             prev_j_skipped_k = 0
-            p2_tail_captured_this_i = False
-            p2_head_captured_this_i = False
             next_pct_bucket = 1
+            p2_singleton_count = 0
+            p2_first_singleton_j = None
+            p2_branch_prune_j = None
+            p2_first_singleton_offset = None
+            p2_branch_prune_offset = None
+            p2_hard_pruned_i = 0
+            p2_encountered_skip_this_i = False
+            p2_relaxed_false_skip_i = 0
             row_i = matrix_u32[i]
             row_i_243 = row_i * 243
 
@@ -976,44 +1086,6 @@ def run_three_guess(
                     )
                     next_pct_bucket += 1
 
-            def maybe_capture_p2_tail_snapshot():
-                nonlocal p2_tail_snap_i
-                nonlocal p2_tail_snap_progress_pct
-                nonlocal p2_tail_snap_skipped
-                nonlocal p2_tail_snap_total
-                nonlocal p2_tail_snap_pct
-                nonlocal p2_tail_captured_this_i
-                nonlocal p2_head_snap_i
-                nonlocal p2_head_snap_progress_pct
-                nonlocal p2_head_snap_skipped
-                nonlocal p2_head_snap_total
-                nonlocal p2_head_snap_pct
-                nonlocal p2_head_captured_this_i
-                if current_mid_total <= 0:
-                    return
-                prog_pct = 100.0 * (current_i_classified_j / current_mid_total)
-                if (not p2_head_captured_this_i) and prog_pct <= 1.0:
-                    p2_head_snap_i = pos_i
-                    p2_head_snap_progress_pct = 1.0
-                    p2_head_snap_skipped = current_i_skipped_j
-                    p2_head_snap_total = current_i_classified_j
-                    p2_head_snap_pct = (
-                        100.0 * current_i_skipped_j / current_i_classified_j
-                        if current_i_classified_j > 0
-                        else 0.0
-                    )
-                    p2_head_captured_this_i = True
-                if (not p2_tail_captured_this_i) and prog_pct >= 99.0:
-                    p2_tail_snap_i = pos_i
-                    p2_tail_snap_progress_pct = 99.0
-                    p2_tail_snap_skipped = current_i_skipped_j
-                    p2_tail_snap_total = current_i_classified_j
-                    p2_tail_snap_pct = (
-                        100.0 * current_i_skipped_j / current_i_classified_j
-                        if current_i_classified_j > 0
-                        else 0.0
-                    )
-                    p2_tail_captured_this_i = True
 
             if len(best_triples) == TOP_TRIPLES and pos_i + 2 < n_allowed:
                 cutoff = max(best_triples[0][0], shared_floor.value)
@@ -1028,7 +1100,6 @@ def run_three_guess(
                     break
 
             pending = deque()
-            j_evaluated = 0
             next_pos_j = pos_i + 1
             broke_j_loop = False
             first_p2_prune_j = None
@@ -1049,16 +1120,24 @@ def run_three_guess(
                     )
 
                     if cutoff >= 0.0 and pos_j + 1 < n_allowed:
+                        # Pre-H12 pruning: h1 + h2 + h3_best is monotonically decreasing,
+                        # so we can safely prune all remaining j's (break loop).
                         upper_bound = min(max_entropy, h1 + h2 + sorted_entropies[pos_j + 1])
                         if upper_bound <= cutoff:
-                            remaining_j = (n_allowed - 1) - pos_j
-                            progress["possible_j_completed"] += remaining_j
-                            current_i_classified_j += remaining_j
-                            current_i_skipped_j += remaining_j
+                            suffix_len = (n_allowed - 1) - pos_j
+                            progress["p2_skipped_k_equiv"] += suffix_len * (suffix_len + 1) // 2
+                            progress["possible_j_completed"] += suffix_len
+                            current_i_classified_j += suffix_len
+                            current_i_skipped_j += suffix_len
                             current_mid_done = current_i_classified_j
                             maybe_log_pct_crossings(time.time())
-                            maybe_capture_p2_tail_snapshot()
-                            first_p2_prune_j = pos_j
+                            if first_p2_prune_j is None:
+                                first_p2_prune_j = pos_j
+                            if p2_branch_prune_j is None:
+                                p2_branch_prune_j = pos_j
+                                p2_branch_prune_offset = max(0, pos_j - (pos_i + 1))
+                            p2_hard_pruned_i += suffix_len
+                            progress["p2_hard_pruned_total"] += suffix_len
                             if (
                                 debug_prune
                                 and pos_i == 0
@@ -1085,14 +1164,23 @@ def run_three_guess(
                     if cutoff >= 0.0 and pos_j + 1 < n_allowed:
                         upper_bound = min(max_entropy, h12 + sorted_entropies[pos_j + 1])
                         if upper_bound <= cutoff:
-                            remaining_j = (n_allowed - 1) - pos_j
-                            progress["possible_j_completed"] += remaining_j
-                            current_i_classified_j += remaining_j
-                            current_i_skipped_j += remaining_j
+                            # Strict mode: Post-H12 bound is non-monotonic in j, so we can
+                            # only safely skip THIS j, not all remaining j's. Continue scanning.
+                            if not p2_encountered_skip_this_i:
+                                p2_encountered_skip_this_i = True
+                            progress["p2_skipped_k_equiv"] += max(0, n_allowed - pos_j - 1)
+                            progress["possible_j_completed"] += 1
+                            current_i_classified_j += 1
+                            current_i_skipped_j += 1
+                            p2_singleton_count += 1
+                            progress["p2_singleton_total"] += 1
+                            if p2_first_singleton_j is None:
+                                p2_first_singleton_j = pos_j
+                                p2_first_singleton_offset = max(0, pos_j - (pos_i + 1))
                             current_mid_done = current_i_classified_j
                             maybe_log_pct_crossings(time.time())
-                            maybe_capture_p2_tail_snapshot()
-                            first_p2_prune_j = pos_j
+                            if first_p2_prune_j is None:
+                                first_p2_prune_j = pos_j
                             if (
                                 debug_prune
                                 and pos_i == 0
@@ -1112,13 +1200,17 @@ def run_three_guess(
                                 first_p2_prune_reported = True
                                 if debug_stop_on_first_p2_i0:
                                     return
-                            broke_j_loop = True
-                            break
+                            next_pos_j += 1
+                            emit_status(time.time())
+                            continue
 
                     row12_scaled = row_i * 59049 + matrix_u32[j] * 243
+                    # Track false skips: if we skipped a j earlier but then process a later j,
+                    # it means the post-H12 pruning heuristic wasn't perfect (h12 wasn't monotonic)
+                    if p2_encountered_skip_this_i:
+                        p2_relaxed_false_skip_i += 1
                     async_result = pool.apply_async(_worker_k_branch, ((i, pos_j, row12_scaled, h12),))
                     pending.append(async_result)
-                    j_evaluated += 1
                     next_pos_j += 1
                     emit_status(time.time())
 
@@ -1129,12 +1221,9 @@ def run_three_guess(
                     current_i_classified_j += 1
                     current_mid_done = current_i_classified_j
                     maybe_log_pct_crossings(time.time())
-                    maybe_capture_p2_tail_snapshot()
                     progress["possible_k_completed"] += result["possible_k"]
                     progress["actual_k_completed"] += result["actual_k"]
                     progress["skipped_k_completed"] += result["possible_k"] - result["actual_k"]
-                    current_i_possible_k += result["possible_k"]
-                    current_i_skipped_k += result["possible_k"] - result["actual_k"]
                     prev_j_index = current_j_index
                     prev_j_possible_k = current_j_possible_k
                     prev_j_skipped_k = current_j_skipped_k
@@ -1156,21 +1245,32 @@ def run_three_guess(
                         with shared_floor.get_lock():
                             if best_triples[0][0] > shared_floor.value:
                                 shared_floor.value = best_triples[0][0]
+                    if snapshots:
+                        prev_floor_for_lift = snapshots[-1]["floor"]
+                    else:
+                        prev_floor_for_lift = 0.0
+                    if progress["floor"] is not None and progress["floor"] > prev_floor_for_lift:
+                        checkpoint_last_floor_lift_delta = progress["floor"] - prev_floor_for_lift
+                        checkpoint_last_floor_lift_elapsed_s = (
+                            elapsed_offset_s + (time.time() - start_time)
+                        )
                     emit_status(time.time())
                 elif broke_j_loop:
                     break
 
             if not broke_j_loop:
-                skipped_j = outer_possible_j - j_evaluated
+                skipped_j = outer_possible_j - current_i_classified_j
                 if skipped_j > 0:
-                    if first_p2_prune_j is None:
-                        first_p2_prune_j = pos_i + 1 + j_evaluated
+                    start_pos_j = pos_i + 1 + current_i_classified_j
+                    suffix_len = max(0, (n_allowed - 1) - start_pos_j)
+                    progress["p2_skipped_k_equiv"] += suffix_len * (suffix_len + 1) // 2
+                    if first_p2_prune_j is None and current_i_classified_j < outer_possible_j:
+                        first_p2_prune_j = pos_i + 1 + current_i_classified_j
                     progress["possible_j_completed"] += skipped_j
                     current_i_classified_j += skipped_j
                     current_i_skipped_j += skipped_j
                     current_mid_done = current_i_classified_j
                     maybe_log_pct_crossings(time.time())
-                    maybe_capture_p2_tail_snapshot()
 
             if first_p2_prune_j is not None and run_first_p2_i is None:
                 run_first_p2_i = pos_i
@@ -1206,11 +1306,16 @@ def run_three_guess(
 
 
             progress["completed_i"] += 1
+            progress["p2_relaxed_false_skip"] += p2_relaxed_false_skip_i
+            p2_last_row_len = current_i_classified_j
+            p2_last_singleton = p2_singleton_count
+            p2_last_hard_pruned = p2_hard_pruned_i
+            p2_last_relaxed_wrong = p2_relaxed_false_skip_i
+            p2_last_first_singleton_offset = p2_first_singleton_offset
+            p2_last_branch_prune_offset = p2_branch_prune_offset
             prev_i_index = pos_i
             prev_i_classified_j = current_i_classified_j
             prev_i_skipped_j = current_i_skipped_j
-            prev_i_possible_k = current_i_possible_k
-            prev_i_skipped_k = current_i_skipped_k
             if current_i_classified_j > 0:
                 last_completed_i_p2_pct = (
                     100.0 * (current_i_skipped_j / current_i_classified_j)
@@ -1450,7 +1555,7 @@ def parse_args():
     parser.add_argument(
         "-checkpoint-file",
         type=str,
-        default=".wordle3_checkpoint.json",
+        default=None,
         help="Checkpoint JSON path for -words 3 (default: .wordle3_checkpoint.json).",
     )
     parser.add_argument(
@@ -1496,6 +1601,11 @@ def main():
     if args.words == 3:
         if not confirm_three_guess(args.force):
             return
+        checkpoint_file = (
+            args.checkpoint_file
+            if args.checkpoint_file is not None
+            else ".wordle3_checkpoint.json"
+        )
         run_three_guess(
             answers,
             allowed,
@@ -1506,7 +1616,7 @@ def main():
             progress_mode=args.progress,
             stats_file=args.stats_file,
             debug_prune_file=args.debug_prune_file,
-            checkpoint_file=args.checkpoint_file,
+            checkpoint_file=checkpoint_file,
             resume_mode=args.resume,
             history_seconds=args.history_seconds,
         )
