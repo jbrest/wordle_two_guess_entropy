@@ -1,7 +1,13 @@
 data/pattern_matrix.npy
+data/pattern_matrix.meta.json
 __pycache__/
 *.pyc
 .DS_Store
 .venv/
 .pytest_cache/
 .wordle3_checkpoint.json
+.gpu_*.checkpoint.json
+.gpu_h12_cache.*
+run.wordle3.log
+*.so
+*.deb

@@ -45,6 +45,10 @@ cd <your-repo-directory>
 pip install -r requirements.txt
 ```
 
+Notes:
+- `numba` is a required dependency for CPU 3-guess entropy evaluation.
+- CUDA/GPU support requires `torch` with CUDA plus `nvcc` toolchain (see `CUDA_SETUP.md`).
+
 ---
 
 ## 📁 Word Lists
@@ -72,9 +76,11 @@ This may take a few minutes and creates:
 
 ```
 data/pattern_matrix.npy
+data/pattern_matrix.meta.json
 ```
 
-Future runs reuse this file.
+Future runs reuse this cache when shape, source-file timestamps, and word-list
+signature all match.
 
 ---
 
@@ -193,6 +199,50 @@ Single-guess mode is the default and equivalent to:
 ```bash
 python wordle_entropy.py -words 1
 ```
+
+---
+
+## ⚡ GPU Searches (Current Path)
+
+Use the Codex GPU entrypoint:
+
+```bash
+python wordle_entropy_gpu_codex.py --mode 2
+python wordle_entropy_gpu_codex.py --mode 3
+```
+
+This path requires the custom CUDA kernel in
+`src/cuda/batched_entropy_codex.cu`; there is no non-kernel fallback mode.
+
+Key mode-3 controls:
+
+- `--dispatch-mode geometric|hybrid`
+- `--floor-source-mode t|t-1` (hybrid only)
+- `--chunk-tasks N`
+- `--append-capacity N`
+- `--progress dashboard|log|off`
+- `--resume auto|new`
+- `--checkpoint-file PATH` (optional)
+
+Examples:
+
+```bash
+# 3-word hybrid, t-1 floor, answers-only allowed set
+python wordle_entropy_gpu_codex.py \
+  --mode 3 \
+  --dispatch-mode hybrid \
+  --floor-source-mode t-1 \
+  --allowed-file data/answers.txt \
+  --resume auto
+
+# 2-word GPU with antidiagonal pair geometry
+python wordle_entropy_gpu_codex.py --mode 2 --pair-order antidiag
+```
+
+Checkpoint defaults for chunked runs:
+- mode 2: `.gpu_codex_mode2_<pair_order>.checkpoint.json`
+- mode 3 geometric: `.gpu_codex_mode3_geometric.checkpoint.json`
+- mode 3 hybrid: `.gpu_codex_mode3_hybrid_<floor_source_mode>.checkpoint.json`
 
 ---
 

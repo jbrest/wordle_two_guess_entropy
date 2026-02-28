@@ -1,37 +1,29 @@
 # Changelog
 
-All notable changes to this project are documented in this file.
+## Current (2026-02-28)
 
-## [0.2.0] - 2026-02-10
+This changelog now tracks the current maintained implementation line only.
 
-### Added
-- Unified CLI entrypoint: `wordle_entropy.py`.
-- New CLI options:
-  - `-words {1,2,3}` (default: `1`)
-  - `-verbose` (two-word and three-word outputs)
-  - `-pair WORD1 WORD2` (overrides `-words`, supports `-verbose`)
-  - `-triple WORD1 WORD2 WORD3` (overrides `-words`, supports `-verbose`)
-  - `-force` (skip confirmation prompt for `-words 3`)
-- GitHub Actions CI workflow for syntax checks in `.github/workflows/ci.yml`.
-- Cache staleness guard for pattern matrix using timestamp checks against
-  `data/answers.txt` and `data/allowed.txt`.
+### Scope
 
-### Changed
-- Data file path handling now resolves relative to source files, not the shell
-  working directory.
-- `README.md` updated for unified CLI usage and output conventions.
-- MIT license text completed.
+- Primary CPU CLI: `wordle_entropy.py`
+- Primary GPU CLI: `wordle_entropy_gpu_codex.py`
+- Primary CUDA wrapper/kernel: `src/cuda/cuda_entropy_codex.py`, `src/cuda/batched_entropy_codex.cu`
 
-### Removed
-- Legacy entrypoints `main.py` and `two_guess_main.py` (superseded by
-  `wordle_entropy.py`).
+### Notable Current-State Items
 
-## [0.1.0] - 2026-02-09
+- CPU 3-guess path uses strict exact pruning with checkpoint/resume support.
+- GPU path supports:
+  - mode 2 (pair search),
+  - mode 3 geometric dispatch,
+  - mode 3 hybrid entangled dispatch with `t` / `t-1` floor modes.
+- Runtime/progress dashboards include normalized progress, pruning, and timing summaries.
+- `numba` is a required dependency for CPU triple-entropy computation.
+- Pattern-matrix cache validation now includes word-list signature and the
+  actual `--answers-file` / `--allowed-file` sources.
+- GPU CLI no longer advertises a nonexistent non-kernel fallback.
 
-### Added
-- Initial release:
-  - Word list loading
-  - Wordle feedback pattern encoding
-  - Pattern matrix build/load cache
-  - Single-guess entropy ranking
-  - Non-adaptive two-guess joint-entropy search with pruning
+### Legacy Policy
+
+Legacy/experimental GPU scripts and kernels were removed from this maintained
+line. Project documentation references only the current implementation path.

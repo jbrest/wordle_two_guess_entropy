@@ -48,6 +48,7 @@ INITIAL_ETT_MIN_CHECKED = 10_000_000
 
 
 _THREE_WORKER_STATE = {}
+_TWO_WORKER_STATE = {}
 
 
 def _pct(cur, total):
@@ -133,6 +134,15 @@ def _render_dashboard(
     last_floor_delta,
     last_floor_lift_elapsed,
     recent_samples,
+    sched_dispatch_last_s,
+    sched_dispatch_all_s,
+    worker_wait_last_s,
+    worker_wait_all_s,
+    result_process_last_s,
+    result_process_all_s,
+    pending_fill_pct,
+    max_pending_cap,
+    starvation_events,
 ):
     worker_elapsed = elapsed * worker_count
     worker_eta = eta_s * worker_count
@@ -239,6 +249,27 @@ def _render_dashboard(
         f"saved work: {_compact_int(saved_k_equiv)} k-equiv evals",
         f"checked: {_compact_int(checked)} triple-evals",
         "",
+        "Scheduler diagnostics",
+        (
+            f"Dispatch last/all: {sched_dispatch_last_s*1000:7.1f} ms / "
+            f"{_fmt_ddhhmm(sched_dispatch_all_s)} "
+            f"({_pct(sched_dispatch_all_s, elapsed):5.2f}% runtime)"
+        ),
+        (
+            f"Worker wait last/all: {worker_wait_last_s*1000:7.1f} ms / "
+            f"{_fmt_ddhhmm(worker_wait_all_s)} "
+            f"({_pct(worker_wait_all_s, elapsed):5.2f}% runtime)"
+        ),
+        (
+            f"Merge last/all: {result_process_last_s*1000:7.1f} ms / "
+            f"{_fmt_ddhhmm(result_process_all_s)} "
+            f"({_pct(result_process_all_s, elapsed):5.2f}% runtime)"
+        ),
+        (
+            f"Pending fill avg: {pending_fill_pct:5.1f}% of cap {max_pending_cap:,} | "
+            f"starvation events: {starvation_events:,}"
+        ),
+        "",
         "Floor",
         f"Current floor: {floor:.4f} bits",
         f"Theoretical max: {max_entropy:.4f} bits",
@@ -325,6 +356,47 @@ def _update_shared_floor(candidate_floor):
             shared_floor.value = candidate_floor
 
 
+def _init_two_worker(
+    sorted_indices,
+    sorted_entropies,
+    matrix,
+    matrix_u16_243,
+):
+    _TWO_WORKER_STATE["sorted_indices"] = sorted_indices
+    _TWO_WORKER_STATE["sorted_entropies"] = sorted_entropies
+    _TWO_WORKER_STATE["matrix"] = matrix
+    _TWO_WORKER_STATE["matrix_u16_243"] = matrix_u16_243
+
+
+def _worker_two_chunk(task):
+    i, pos_i, pos_j_start, pos_j_end, floor_snapshot = task
+    sorted_indices = _TWO_WORKER_STATE["sorted_indices"]
+    sorted_entropies = _TWO_WORKER_STATE["sorted_entropies"]
+    matrix = _TWO_WORKER_STATE["matrix"]
+    matrix_u16_243 = _TWO_WORKER_STATE["matrix_u16_243"]
+
+    h1 = sorted_entropies[pos_i]
+    row1_scaled = matrix_u16_243[i]
+    local_best = []
+
+    for pos_j in range(pos_j_start, pos_j_end):
+        h2 = sorted_entropies[pos_j]
+        if (h1 + h2) <= floor_snapshot:
+            break
+
+        j = sorted_indices[pos_j]
+        h12 = two_guess_entropy(row1_scaled, matrix[j])
+        if floor_snapshot >= 0.0 and h12 <= floor_snapshot:
+            continue
+
+        if len(local_best) < TOP_PAIRS:
+            heapq.heappush(local_best, (h12, i, j))
+        elif h12 > local_best[0][0]:
+            heapq.heapreplace(local_best, (h12, i, j))
+
+    return local_best
+
+
 def _init_k_worker(
     sorted_indices,
     sorted_entropies,
@@ -398,7 +470,7 @@ def run_single_guess(answers, allowed, matrix):
         print(f"{word} [{answer_flag}]: {entropies[idx]:.4f} bits")
 
 
-def run_two_guess(answers, allowed, matrix, verbose):
+def run_two_guess(answers, allowed, matrix, verbose, workers=None):
     answer_set = set(answers)
     n_allowed = len(allowed)
 
@@ -414,48 +486,117 @@ def run_two_guess(answers, allowed, matrix, verbose):
     best_pairs = []
     start_time = time.time()
     early_exit_reason = None
+    worker_count = workers if workers is not None else 1
+    worker_count = max(1, int(worker_count))
 
-    print("Starting optimized full two guess search...\n")
+    if worker_count == 1:
+        print("Starting optimized full two guess search...\n")
+        for pos_i in tqdm(range(n_allowed), desc="First guess"):
+            i = sorted_indices[pos_i]
+            row1_scaled = matrix_u16_243[i]
+            h1 = sorted_entropies[pos_i]
 
-    for pos_i in tqdm(range(n_allowed), desc="First guess"):
-        i = sorted_indices[pos_i]
-        row1_scaled = matrix_u16_243[i]
-        h1 = sorted_entropies[pos_i]
+            if len(best_pairs) == TOP_PAIRS and pos_i + 1 < n_allowed:
+                next_h2 = sorted_entropies[pos_i + 1]
+                cutoff = best_pairs[0][0]
+                upper_bound = h1 + next_h2
+                if upper_bound <= cutoff:
+                    early_exit_reason = (
+                        f"Early exit at outer index {pos_i}: "
+                        f"best possible remaining pair upper bound "
+                        f"{upper_bound:.6f} <= current floor {cutoff:.6f}."
+                    )
+                    break
 
-        if len(best_pairs) == TOP_PAIRS and pos_i + 1 < n_allowed:
-            next_h2 = sorted_entropies[pos_i + 1]
-            cutoff = best_pairs[0][0]
-            upper_bound = h1 + next_h2
-            if upper_bound <= cutoff:
-                early_exit_reason = (
-                    f"Early exit at outer index {pos_i}: "
-                    f"best possible remaining pair upper bound "
-                    f"{upper_bound:.6f} <= current floor {cutoff:.6f}."
+            for pos_j in range(pos_i + 1, n_allowed):
+                j = sorted_indices[pos_j]
+                h2 = sorted_entropies[pos_j]
+
+                if len(best_pairs) == TOP_PAIRS and (h1 + h2) <= best_pairs[0][0]:
+                    break
+
+                h12 = two_guess_entropy(row1_scaled, matrix[j])
+
+                if len(best_pairs) < TOP_PAIRS:
+                    heapq.heappush(best_pairs, (h12, i, j))
+                elif h12 > best_pairs[0][0]:
+                    heapq.heapreplace(best_pairs, (h12, i, j))
+
+            if pos_i % 50 == 0 and pos_i > 0:
+                elapsed = time.time() - start_time
+                rate = pos_i / elapsed
+                remaining = (n_allowed - pos_i) / rate if rate > 0 else 0
+                tqdm.write(
+                    f"Processed {pos_i}/{n_allowed} first guesses. "
+                    f"Elapsed: {elapsed/60:.1f} min, ETA: {remaining/60:.1f} min"
                 )
-                break
+    else:
+        print(
+            f"Starting optimized full two guess search with {worker_count} worker(s)...\n"
+        )
+        ctx = mp.get_context("fork")
+        with ctx.Pool(
+            processes=worker_count,
+            initializer=_init_two_worker,
+            initargs=(sorted_indices, sorted_entropies, matrix, matrix_u16_243),
+        ) as pool:
+            for pos_i in tqdm(range(n_allowed), desc="First guess"):
+                i = sorted_indices[pos_i]
+                h1 = sorted_entropies[pos_i]
 
-        for pos_j in range(pos_i + 1, n_allowed):
-            j = sorted_indices[pos_j]
-            h2 = sorted_entropies[pos_j]
+                floor_snapshot = best_pairs[0][0] if len(best_pairs) == TOP_PAIRS else -1.0
+                if len(best_pairs) == TOP_PAIRS and pos_i + 1 < n_allowed:
+                    next_h2 = sorted_entropies[pos_i + 1]
+                    upper_bound = h1 + next_h2
+                    if upper_bound <= floor_snapshot:
+                        early_exit_reason = (
+                            f"Early exit at outer index {pos_i}: "
+                            f"best possible remaining pair upper bound "
+                            f"{upper_bound:.6f} <= current floor {floor_snapshot:.6f}."
+                        )
+                        break
 
-            if len(best_pairs) == TOP_PAIRS and (h1 + h2) <= best_pairs[0][0]:
-                break
+                if floor_snapshot > -1.0:
+                    cutoff_h2 = floor_snapshot - h1
+                    pos_j_end = int(
+                        np.searchsorted(
+                            -sorted_entropies,
+                            -cutoff_h2,
+                            side="left",
+                        )
+                    )
+                else:
+                    pos_j_end = n_allowed
 
-            h12 = two_guess_entropy(row1_scaled, matrix[j])
+                pos_j_start = pos_i + 1
+                if pos_j_end <= pos_j_start:
+                    continue
+                pos_j_end = min(pos_j_end, n_allowed)
 
-            if len(best_pairs) < TOP_PAIRS:
-                heapq.heappush(best_pairs, (h12, i, j))
-            elif h12 > best_pairs[0][0]:
-                heapq.heapreplace(best_pairs, (h12, i, j))
+                span = pos_j_end - pos_j_start
+                target_tasks = max(1, worker_count * 4)
+                chunk_len = max(128, (span + target_tasks - 1) // target_tasks)
 
-        if pos_i % 50 == 0 and pos_i > 0:
-            elapsed = time.time() - start_time
-            rate = pos_i / elapsed
-            remaining = (n_allowed - pos_i) / rate if rate > 0 else 0
-            tqdm.write(
-                f"Processed {pos_i}/{n_allowed} first guesses. "
-                f"Elapsed: {elapsed/60:.1f} min, ETA: {remaining/60:.1f} min"
-            )
+                tasks = []
+                for chunk_start in range(pos_j_start, pos_j_end, chunk_len):
+                    chunk_end = min(chunk_start + chunk_len, pos_j_end)
+                    tasks.append((i, pos_i, chunk_start, chunk_end, floor_snapshot))
+
+                for local_best in pool.imap_unordered(_worker_two_chunk, tasks, chunksize=1):
+                    for candidate in local_best:
+                        if len(best_pairs) < TOP_PAIRS:
+                            heapq.heappush(best_pairs, candidate)
+                        elif candidate[0] > best_pairs[0][0]:
+                            heapq.heapreplace(best_pairs, candidate)
+
+                if pos_i % 50 == 0 and pos_i > 0:
+                    elapsed = time.time() - start_time
+                    rate = pos_i / elapsed
+                    remaining = (n_allowed - pos_i) / rate if rate > 0 else 0
+                    tqdm.write(
+                        f"Processed {pos_i}/{n_allowed} first guesses. "
+                        f"Elapsed: {elapsed/60:.1f} min, ETA: {remaining/60:.1f} min"
+                    )
 
     best_pairs.sort(reverse=True)
 
@@ -614,6 +755,16 @@ def run_three_guess(
     last_cur_checked = 0
     initial_ett_s = None
     cur_window = deque()
+    max_pending_cap = max(1, worker_count * chunk_size)
+    sched_dispatch_s_total = 0.0
+    sched_dispatch_last_s = 0.0
+    worker_wait_s_total = 0.0
+    worker_wait_last_s = 0.0
+    result_process_s_total = 0.0
+    result_process_last_s = 0.0
+    pending_depth_sum = 0
+    pending_depth_samples = 0
+    starvation_events = 0
     current_i_classified_j = 0
     current_i_skipped_j = 0
     prev_i_index = None
@@ -831,6 +982,15 @@ def run_three_guess(
             nonlocal p2_branch_prune_j
             nonlocal checkpoint_last_floor_lift_elapsed_s
             nonlocal checkpoint_last_floor_lift_delta
+            nonlocal sched_dispatch_s_total
+            nonlocal sched_dispatch_last_s
+            nonlocal worker_wait_s_total
+            nonlocal worker_wait_last_s
+            nonlocal result_process_s_total
+            nonlocal result_process_last_s
+            nonlocal pending_depth_sum
+            nonlocal pending_depth_samples
+            nonlocal starvation_events
             elapsed = elapsed_offset_s + (now - start_time)
             prune_total_j = progress["possible_j_completed"]
             actual_total_j = progress["actual_j_completed"]
@@ -961,6 +1121,11 @@ def run_three_guess(
 
             recent_samples = snapshots[-6:]
             floor_display = progress["floor"] if progress["floor"] is not None else 0.0
+            pending_fill_pct = (
+                100.0
+                * (pending_depth_sum / max(1, pending_depth_samples))
+                / max(1, max_pending_cap)
+            )
 
             if now >= next_render_time:
                 if progress_mode in ("dashboard", "live"):
@@ -1016,6 +1181,15 @@ def run_three_guess(
                             last_floor_delta=last_floor_delta,
                             last_floor_lift_elapsed=last_floor_lift_elapsed,
                             recent_samples=recent_samples,
+                            sched_dispatch_last_s=sched_dispatch_last_s,
+                            sched_dispatch_all_s=sched_dispatch_s_total,
+                            worker_wait_last_s=worker_wait_last_s,
+                            worker_wait_all_s=worker_wait_s_total,
+                            result_process_last_s=result_process_last_s,
+                            result_process_all_s=result_process_s_total,
+                            pending_fill_pct=pending_fill_pct,
+                            max_pending_cap=max_pending_cap,
+                            starvation_events=starvation_events,
                         )
                     sys.stdout.write("\033[2J\033[H")
                     sys.stdout.write(output + "\n")
@@ -1106,9 +1280,10 @@ def run_three_guess(
             first_p2_prune_reported = False
             # Keep dispatch serial in order while allowing enough in-flight work
             # to saturate workers.
-            max_pending = max(1, worker_count * chunk_size)
+            max_pending = max_pending_cap
 
             while next_pos_j < n_allowed - 1 or pending:
+                dispatch_block_t0 = time.perf_counter()
                 while not broke_j_loop and next_pos_j < n_allowed - 1 and len(pending) < max_pending:
                     pos_j = next_pos_j
                     j = sorted_indices[pos_j]
@@ -1214,8 +1389,20 @@ def run_three_guess(
                     next_pos_j += 1
                     emit_status(time.time())
 
+                dispatch_block_s = max(0.0, time.perf_counter() - dispatch_block_t0)
+                sched_dispatch_last_s = dispatch_block_s
+                sched_dispatch_s_total += dispatch_block_s
+                pending_depth_sum += len(pending)
+                pending_depth_samples += 1
+
                 if pending:
+                    wait_t0 = time.perf_counter()
                     result = pending.popleft().get()
+                    wait_s = max(0.0, time.perf_counter() - wait_t0)
+                    worker_wait_last_s = wait_s
+                    worker_wait_s_total += wait_s
+
+                    process_t0 = time.perf_counter()
                     progress["possible_j_completed"] += 1
                     progress["actual_j_completed"] += 1
                     current_i_classified_j += 1
@@ -1254,9 +1441,14 @@ def run_three_guess(
                         checkpoint_last_floor_lift_elapsed_s = (
                             elapsed_offset_s + (time.time() - start_time)
                         )
+                    process_s = max(0.0, time.perf_counter() - process_t0)
+                    result_process_last_s = process_s
+                    result_process_s_total += process_s
                     emit_status(time.time())
                 elif broke_j_loop:
                     break
+                else:
+                    starvation_events += 1
 
             if not broke_j_loop:
                 skipped_j = outer_possible_j - current_i_classified_j
@@ -1526,7 +1718,7 @@ def parse_args():
         "-workers",
         type=int,
         default=None,
-        help="Worker processes for -words 3 (default: CPU count).",
+        help="Worker processes for -words 2/-words 3 (default: 1 for -words 2, CPU count for -words 3).",
     )
     parser.add_argument(
         "-chunk-size",
@@ -1570,13 +1762,33 @@ def parse_args():
         default=DEFAULT_HISTORY_SECONDS,
         help="Sampling period in seconds for run-history summaries in -words 3 mode.",
     )
+    parser.add_argument(
+        "--answers-file",
+        type=str,
+        default=None,
+        help="Path to newline-separated answers word list (default: data/answers.txt).",
+    )
+    parser.add_argument(
+        "--allowed-file",
+        type=str,
+        default=None,
+        help="Path to newline-separated allowed word list (default: data/allowed.txt).",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    answers, allowed = load_words()
-    matrix = load_or_build_matrix(allowed, answers)
+    answers, allowed = load_words(
+        answers_path=args.answers_file,
+        allowed_path=args.allowed_file,
+    )
+    matrix = load_or_build_matrix(
+        allowed,
+        answers,
+        answers_path=args.answers_file,
+        allowed_path=args.allowed_file,
+    )
 
     if args.pair is not None:
         word1, word2 = (w.lower() for w in args.pair)
@@ -1622,7 +1834,7 @@ def main():
         )
         return
 
-    run_two_guess(answers, allowed, matrix, args.verbose)
+    run_two_guess(answers, allowed, matrix, args.verbose, workers=args.workers)
 
 
 if __name__ == "__main__":

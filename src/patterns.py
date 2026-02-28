@@ -18,6 +18,8 @@ since all guess/answer feedback is precomputed once.
 """
 
 from collections import Counter
+import hashlib
+import json
 from pathlib import Path
 import numpy as np
 from tqdm import tqdm
@@ -26,6 +28,7 @@ from tqdm import tqdm
 # Location where the pattern matrix is stored
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 MATRIX_PATH = DATA_DIR / "pattern_matrix.npy"
+MATRIX_META_PATH = DATA_DIR / "pattern_matrix.meta.json"
 ANSWERS_PATH = DATA_DIR / "answers.txt"
 ALLOWED_PATH = DATA_DIR / "allowed.txt"
 
@@ -68,7 +71,45 @@ def encode_pattern(guess: str, answer: str) -> int:
     return code
 
 
-def build_matrix(allowed: list[str], answers: list[str]) -> np.ndarray:
+def _word_lists_signature(allowed: list[str], answers: list[str]) -> str:
+    h = hashlib.sha256()
+    h.update(f"{len(allowed)}|{len(answers)}|".encode("ascii"))
+    for word in allowed:
+        h.update(word.encode("ascii"))
+        h.update(b"\n")
+    h.update(b"|")
+    for word in answers:
+        h.update(word.encode("ascii"))
+        h.update(b"\n")
+    return h.hexdigest()
+
+
+def _write_matrix_meta(
+    allowed: list[str],
+    answers: list[str],
+    *,
+    answers_source: Path,
+    allowed_source: Path,
+):
+    payload = {
+        "word_lists_sha256": _word_lists_signature(allowed, answers),
+        "n_allowed": len(allowed),
+        "n_answers": len(answers),
+        "answers_source": str(answers_source.resolve()),
+        "allowed_source": str(allowed_source.resolve()),
+    }
+    with open(MATRIX_META_PATH, "w", encoding="ascii") as handle:
+        json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+
+
+def build_matrix(
+    allowed: list[str],
+    answers: list[str],
+    *,
+    answers_source: Path,
+    allowed_source: Path,
+) -> np.ndarray:
     """
     Compute the full pattern matrix from scratch.
 
@@ -86,12 +127,24 @@ def build_matrix(allowed: list[str], answers: list[str]) -> np.ndarray:
             matrix[i, j] = encode_pattern(guess, answer)
 
     np.save(MATRIX_PATH, matrix)
+    _write_matrix_meta(
+        allowed,
+        answers,
+        answers_source=answers_source,
+        allowed_source=allowed_source,
+    )
     print("Matrix saved to disk.")
 
     return matrix
 
 
-def load_or_build_matrix(allowed: list[str], answers: list[str]) -> np.ndarray:
+def load_or_build_matrix(
+    allowed: list[str],
+    answers: list[str],
+    *,
+    answers_path: str | None = None,
+    allowed_path: str | None = None,
+) -> np.ndarray:
     """
     Load a previously built pattern matrix if it matches current dimensions.
 
@@ -100,6 +153,9 @@ def load_or_build_matrix(allowed: list[str], answers: list[str]) -> np.ndarray:
     """
     n_allowed = len(allowed)
     n_answers = len(answers)
+    answers_source = Path(answers_path) if answers_path is not None else ANSWERS_PATH
+    allowed_source = Path(allowed_path) if allowed_path is not None else ALLOWED_PATH
+    expected_sig = _word_lists_signature(allowed, answers)
 
     if MATRIX_PATH.exists():
         matrix = np.load(MATRIX_PATH)
@@ -110,19 +166,34 @@ def load_or_build_matrix(allowed: list[str], answers: list[str]) -> np.ndarray:
         # Guard 2: if either source word file is newer than the matrix cache,
         # assume the matrix is stale and force a rebuild.
         matrix_mtime = MATRIX_PATH.stat().st_mtime
-        answers_mtime = ANSWERS_PATH.stat().st_mtime
-        allowed_mtime = ALLOWED_PATH.stat().st_mtime
+        answers_mtime = answers_source.stat().st_mtime
+        allowed_mtime = allowed_source.stat().st_mtime
         cache_is_new_enough = (
             matrix_mtime >= answers_mtime and matrix_mtime >= allowed_mtime
         )
+        sig_ok = False
+        if MATRIX_META_PATH.exists():
+            try:
+                with open(MATRIX_META_PATH, "r", encoding="ascii") as handle:
+                    payload = json.load(handle)
+                sig_ok = payload.get("word_lists_sha256") == expected_sig
+            except (json.JSONDecodeError, OSError):
+                sig_ok = False
 
-        if shape_ok and cache_is_new_enough:
+        if shape_ok and cache_is_new_enough and sig_ok:
             print("Loaded compatible pattern matrix from disk.")
             return matrix
 
         if not shape_ok:
             print("Matrix shape mismatch. Rebuilding.")
-        else:
+        elif not cache_is_new_enough:
             print("Matrix is older than word lists. Rebuilding.")
+        else:
+            print("Matrix word-list signature mismatch. Rebuilding.")
 
-    return build_matrix(allowed, answers)
+    return build_matrix(
+        allowed,
+        answers,
+        answers_source=answers_source,
+        allowed_source=allowed_source,
+    )
